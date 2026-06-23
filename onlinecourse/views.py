@@ -1,57 +1,66 @@
 from django.shortcuts import get_object_or_404, render, redirect
-from django.db.models import Count
-from .models import Course, Submission, Choice
+from django.contrib.auth.decorators import login_required
+from .models import Course, Submission, Choice, Question
 
+
+@login_required
 def submit(request, course_id):
     """
-    Handles the submission of an exam for a given course.
-    Expects POST data where each selected choice is sent with a key
-    formatted as ``choice_<question_id>`` and the value being the
-    primary key of the chosen ``Choice`` instance.
+    Handles the exam submission for a given course.
+    - Retrieves the course and the logged‑in learner.
+    - Creates a Submission instance.
+    - Associates the selected Choice objects with the submission.
+    - Redirects to the result view after processing.
     """
-    if request.method != "POST":
-        # If the request is not POST, simply render the exam page.
-        course = get_object_or_404(Course, pk=course_id)
-        return render(request, "exam.html", {"course": course})
-
-    # Retrieve the course and the learner (authenticated user)
     course = get_object_or_404(Course, pk=course_id)
     learner = request.user
 
-    # Create a new Submission instance
-    submission = Submission.objects.create(course=course, learner=learner)
+    if request.method == "POST":
+        # Create a new submission record
+        submission = Submission.objects.create(course=course, learner=learner)
 
-    # Attach the selected choices to the submission
-    for key, value in request.POST.items():
-        if key.startswith("choice_"):
-            try:
-                choice = Choice.objects.get(pk=int(value))
-                submission.choices.add(choice)
-            except (ValueError, Choice.DoesNotExist):
-                # Skip malformed or non‑existent choice IDs
-                continue
+        # Expected POST data: choice_<question_id> = <choice_id>
+        for key, value in request.POST.items():
+            if key.startswith("choice_"):
+                try:
+                    choice_id = int(value)
+                    choice = Choice.objects.get(pk=choice_id)
+                    submission.choices.add(choice)
+                except (ValueError, Choice.DoesNotExist):
+                    # Ignore malformed or missing choice IDs
+                    continue
 
-    submission.save()
-    # Redirect to the result view after successful submission
-    return redirect("show_exam_result", submission_id=submission.id)
+        # After storing the choices, show the exam result
+        return redirect("show_exam_result", submission_id=submission.id)
+
+    # If GET request, render the exam page with all questions
+    questions = Question.objects.filter(course=course).prefetch_related("choice_set")
+    return render(
+        request,
+        "exam.html",
+        {"course": course, "questions": questions},
+    )
 
 
 def show_exam_result(request, submission_id):
     """
-    Displays the result of a previously submitted exam.
-    Calculates the total number of questions, the number of
-    correctly answered questions, and the percentage score.
+    Displays the result of a completed exam.
+    - Calculates the total number of questions.
+    - Determines how many were answered correctly.
+    - Computes a percentage score.
+    - Renders the result template with the calculated data.
     """
     submission = get_object_or_404(Submission, pk=submission_id)
+    course = submission.course
 
-    # Total number of questions in the course (across all lessons)
-    total_questions = (
-        submission.course.lesson_set.aggregate(total=Count("question"))
-        .get("total") or 0
-    )
+    total_questions = course.question_set.count()
+    correct_answers = 0
 
-    # Count correctly selected choices (assuming each question has a single correct choice)
-    correct_answers = sum(1 for choice in submission.choices.all() if choice.is_correct)
+    for question in course.question_set.all():
+        selected_choices = submission.choices.filter(question=question)
+        # Assume Question model provides an `is_correct` helper
+        if question.is_correct(selected_choices):
+            correct_answers += 1
 
     score = int((correct_answers / total_questions) * 100) if total_questions else 0
 
