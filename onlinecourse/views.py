@@ -1,58 +1,61 @@
 from django.shortcuts import render, get_object_or_404, redirect
 from django.contrib.auth.decorators import login_required
-from .models import Course, Lesson, Question, Choice, Submission, Answer
+from django.db import transaction
+from .models import Course, Lesson, Question, Choice, Submission, Learner
 
 
 @login_required
-def submit(request):
+@transaction.atomic
+def submit(request, course_id):
     """
-    Handles POST submissions of exam answers.
-    Expects 'question_id' and 'choice_id' in the POST data.
+    Handles the exam submission for a given course.
+    Expects POST data where each key is ``question_<id>`` and the value is the selected
+    ``Choice`` primary key.
     """
+    course = get_object_or_404(Course, pk=course_id)
+    learner = get_object_or_404(Learner, user=request.user)
+
     if request.method == 'POST':
-        question_id = request.POST.get('question_id')
-        choice_id = request.POST.get('choice_id')
+        total_questions = 0
+        correct_answers = 0
 
-        question = get_object_or_404(Question, pk=question_id)
-        selected_choice = get_object_or_404(Choice, pk=choice_id, question=question)
+        for lesson in course.lessons.all():
+            for question in lesson.questions.all():
+                total_questions += 1
+                selected_choice_id = request.POST.get(f'question_{question.id}')
+                if selected_choice_id:
+                    selected_choice = Choice.objects.filter(pk=selected_choice_id,
+                                                            question=question).first()
+                    if selected_choice and selected_choice.is_correct:
+                        correct_answers += 1
 
-        submission, created = Submission.objects.get_or_create(
-            user=request.user,
-            question=question,
-            defaults={'selected_choice': selected_choice}
+        score = (correct_answers / total_questions) * 100 if total_questions else 0
+
+        # Record the submission (associate with the first lesson for simplicity)
+        submission = Submission.objects.create(
+            learner=learner,
+            lesson=course.lessons.first(),
+            score=score
         )
-        if not created:
-            submission.selected_choice = selected_choice
-            submission.save()
+        request.session['submission_id'] = submission.id
+        return redirect('onlinecourse:show_exam_result', course_id=course.id)
 
-        # Create or update the corresponding Answer record
-        Answer.objects.update_or_create(
-            submission=submission,
-            defaults={'is_correct': selected_choice.is_correct}
-        )
-
-        return redirect('onlinecourse:show_exam_result')
-    else:
-        # If not POST, redirect to a generic exam page (implementation dependent)
-        return redirect('onlinecourse:exam_page')
+    # GET request – render the exam page
+    return render(request, 'exam.html', {'course': course})
 
 
 @login_required
-def show_exam_result(request):
+def show_exam_result(request, course_id):
     """
-    Calculates the user's exam score and renders the result page.
+    Displays the result of the most recent exam submission for the logged‑in learner.
     """
-    submissions = Submission.objects.filter(user=request.user).select_related(
-        'question', 'selected_choice'
-    )
-    total_questions = submissions.count()
-    correct_answers = submissions.filter(selected_choice__is_correct=True).count()
-    score_percent = (correct_answers / total_questions * 100) if total_questions else 0
+    submission_id = request.session.get('submission_id')
+    submission = get_object_or_404(Submission, pk=submission_id,
+                                   learner__user=request.user)
 
     context = {
-        'total_questions': total_questions,
-        'correct_answers': correct_answers,
-        'score_percent': round(score_percent, 2),
-        'submissions': submissions,
+        'course': get_object_or_404(Course, pk=course_id),
+        'submission': submission,
+        'message': 'Congratulations! You have completed the exam.'
     }
     return render(request, 'exam_result.html', context)
