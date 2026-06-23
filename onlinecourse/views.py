@@ -1,87 +1,82 @@
-"""Views for handling exam submission and result display."""
-
-from django.shortcuts import get_object_or_404, redirect, render
+from django.shortcuts import get_object_or_404, render, redirect
+from django.http import HttpResponse
 from django.contrib.auth.decorators import login_required
-from django.urls import reverse
-from django.http import HttpResponseBadRequest
-
-from .models import Course, Submission, Choice, Question
+from .models import Course, Learner, Submission, Choice, Question
 
 
 @login_required
 def submit(request, course_id):
     """
-    Handles the POST request when a learner submits answers for a course exam.
-
-    Steps:
-    1. Retrieve the Course instance.
-    2. Create a new Submission linked to the current user (learner) and the course.
-    3. Iterate over posted choice IDs, fetch each Choice, and associate it with the Submission.
-    4. Redirect the learner to the result page for the created submission.
+    Handles the submission of an exam for a given course.
+    Creates a Submission instance, links the selected Choice objects,
+    and redirects to the result view.
     """
-    if request.method != "POST":
-        return HttpResponseBadRequest("Only POST requests are allowed for exam submission.")
-
+    # Retrieve the course; 404 if not found
     course = get_object_or_404(Course, pk=course_id)
-    learner = request.user
 
-    # Create a new submission record
-    submission = Submission.objects.create(course=course, learner=learner)
+    # Assume the logged‑in user is a Learner; create if necessary
+    learner, _ = Learner.objects.get_or_create(user=request.user)
 
-    # Expecting POST data in the form: choice_<question_id> = <choice_id>
-    for key, value in request.POST.items():
-        if key.startswith("choice_"):
+    # Create a new Submission record
+    submission = Submission.objects.create(
+        learner=learner,
+        course=course,
+    )
+
+    # Expected POST data format:
+    #   choice_<question_id> = <choice_id>
+    # Iterate over all questions in the course and attach the selected choices
+    for question in course.question_set.all():
+        choice_key = f"choice_{question.id}"
+        choice_id = request.POST.get(choice_key)
+        if choice_id:
             try:
-                choice_id = int(value)
-                choice = Choice.objects.get(pk=choice_id)
+                choice = Choice.objects.get(pk=int(choice_id), question=question)
                 submission.choices.add(choice)
-            except (ValueError, Choice.DoesNotExist):
-                # Skip invalid choice entries
+            except Choice.DoesNotExist:
+                # Ignore invalid choice IDs – they will not affect scoring
                 continue
 
-    # After processing all choices, redirect to the result view
-    return redirect(reverse("show_exam_result", args=[submission.id]))
+    # After processing, redirect to the result page
+    return redirect('show_exam_result', submission_id=submission.id)
 
 
 @login_required
 def show_exam_result(request, submission_id):
     """
-    Displays the exam result for a given submission.
-
-    The view calculates the total number of questions, the number of correctly answered
-    questions, and the percentage score. It then renders a template showing the
-    learner's performance along with a congratulatory message if the score is
-    80% or higher.
+    Displays the result of a completed exam.
+    Calculates the total score based on the learner's selected choices.
     """
-    submission = get_object_or_404(Submission, pk=submission_id, learner=request.user)
+    submission = get_object_or_404(Submission, pk=submission_id)
     course = submission.course
+    learner = submission.learner
 
-    # Gather all questions for the course
-    questions = Question.objects.filter(lesson__course=course).distinct()
-    total_questions = questions.count()
+    total_score = 0
+    max_score = 0
+    question_results = []
 
-    # Determine how many questions were answered correctly
-    correct_answers = 0
-    for question in questions:
-        # All choices selected by the learner for this question
+    for question in course.question_set.all():
+        max_score += question.grade
         selected_choices = submission.choices.filter(question=question)
+        is_correct = all(
+            choice.is_correct for choice in selected_choices
+        ) and selected_choices.count() == question.choice_set.filter(is_correct=True).count()
+        if is_correct:
+            total_score += question.grade
 
-        # Correct choices for the question
-        correct_choices = Choice.objects.filter(question=question, is_correct=True)
-
-        # A question is correct only if the selected set matches the correct set exactly
-        if set(selected_choices) == set(correct_choices):
-            correct_answers += 1
-
-    score_percentage = (correct_answers / total_questions * 100) if total_questions else 0
+        question_results.append({
+            'question': question,
+            'selected_choices': selected_choices,
+            'is_correct': is_correct,
+        })
 
     context = {
-        "course": course,
-        "submission": submission,
-        "total_questions": total_questions,
-        "correct_answers": correct_answers,
-        "score_percentage": round(score_percentage, 2),
-        "passed": score_percentage >= 80,
+        'course': course,
+        'learner': learner,
+        'submission': submission,
+        'total_score': total_score,
+        'max_score': max_score,
+        'question_results': question_results,
     }
 
-    return render(request, "onlinecourse/exam_result.html", context)
+    return render(request, 'onlinecourse/exam_result.html', context)
