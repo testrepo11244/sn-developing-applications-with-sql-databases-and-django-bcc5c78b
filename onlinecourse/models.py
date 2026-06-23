@@ -2,80 +2,61 @@ from django.db import models
 from django.contrib.auth.models import User
 
 
-class Instructor(models.Model):
-    user = models.OneToOneField(
-        User, on_delete=models.CASCADE, related_name='instructor_profile'
-    )
-    bio = models.TextField(blank=True)
-
-    def __str__(self):
-        return f"Instructor: {self.user.get_full_name() or self.user.username}"
-
-
 class Course(models.Model):
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
-    instructors = models.ManyToManyField(
-        Instructor, related_name='courses', blank=True
-    )
 
     def __str__(self):
         return self.name
 
 
 class Lesson(models.Model):
-    course = models.ForeignKey(
-        Course, on_delete=models.CASCADE, related_name='lessons'
-    )
+    course = models.ForeignKey(Course, related_name='lessons', on_delete=models.CASCADE)
     title = models.CharField(max_length=200)
     content = models.TextField(blank=True)
 
     def __str__(self):
-        return f"{self.course.name} - {self.title}"
+        return self.title
 
 
 class Question(models.Model):
-    lesson = models.ForeignKey(
-        Lesson, on_delete=models.CASCADE, related_name='questions'
-    )
+    lesson = models.ForeignKey(Lesson, related_name='questions', on_delete=models.CASCADE)
     text = models.CharField(max_length=500)
 
     def __str__(self):
-        return f"Question {self.id} for {self.lesson.title}"
+        return self.text
 
 
 class Choice(models.Model):
-    question = models.ForeignKey(
-        Question, on_delete=models.CASCADE, related_name='choices'
-    )
+    question = models.ForeignKey(Question, related_name='choices', on_delete=models.CASCADE)
     text = models.CharField(max_length=300)
     is_correct = models.BooleanField(default=False)
 
     def __str__(self):
-        return f"Choice for Q{self.question.id}: {self.text}"
+        return f"{self.text} ({'Correct' if self.is_correct else 'Incorrect'})"
+
+
+class Learner(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    enrolled_courses = models.ManyToManyField(Course, related_name='learners', blank=True)
+
+    def __str__(self):
+        return self.user.username
+
+
+class Instructor(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    courses = models.ManyToManyField(Course, related_name='instructors', blank=True)
+
+    def __str__(self):
+        return self.user.username
 
 
 class Submission(models.Model):
-    user = models.ForeignKey(
-        User, on_delete=models.CASCADE, related_name='submissions'
-    )
-    question = models.ForeignKey(
-        Question, on_delete=models.CASCADE, related_name='submissions'
-    )
-    selected_choice = models.ForeignKey(
-        Choice, on_delete=models.CASCADE, related_name='+'
-    )
+    learner = models.ForeignKey(Learner, related_name='submissions', on_delete=models.CASCADE)
+    lesson = models.ForeignKey(Lesson, related_name='submissions', on_delete=models.CASCADE)
+    score = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     submitted_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"Submission by {self.user.username} for Q{self.question.id}"
-
-
-class Answer(models.Model):
-    submission = models.OneToOneField(
-        Submission, on_delete=models.CASCADE, related_name='answer'
-    )
-    is_correct = models.BooleanField()
-
-    def __str__(self):
-        return f"Answer for {self.submission}"
+        return f"Submission by {self.learner} for {self.lesson}"
