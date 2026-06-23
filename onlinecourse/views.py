@@ -1,61 +1,70 @@
 from django.shortcuts import render, get_object_or_404, redirect
+from django.urls import reverse
 from django.contrib.auth.decorators import login_required
-from django.db import transaction
-from .models import Course, Lesson, Question, Choice, Submission, Learner
+from .models import Course, Lesson, Question, Choice, Submission, Answer, Learner
 
 
 @login_required
-@transaction.atomic
 def submit(request, course_id):
     """
-    Handles the exam submission for a given course.
-    Expects POST data where each key is ``question_<id>`` and the value is the selected
-    ``Choice`` primary key.
+    Handles the POST request when a learner submits answers for a course exam.
+    Creates a ``Submission`` instance, records each selected ``Choice`` as an
+    ``Answer`` and redirects to the result page.
     """
     course = get_object_or_404(Course, pk=course_id)
     learner = get_object_or_404(Learner, user=request.user)
 
-    if request.method == 'POST':
-        total_questions = 0
-        correct_answers = 0
+    if request.method == "POST":
+        # Create a new submission record
+        submission = Submission.objects.create(learner=learner, course=course)
 
-        for lesson in course.lessons.all():
-            for question in lesson.questions.all():
-                total_questions += 1
-                selected_choice_id = request.POST.get(f'question_{question.id}')
-                if selected_choice_id:
-                    selected_choice = Choice.objects.filter(pk=selected_choice_id,
-                                                            question=question).first()
-                    if selected_choice and selected_choice.is_correct:
-                        correct_answers += 1
+        # Iterate over posted choices; expected format: question_<id>=<choice_id>
+        for key, value in request.POST.items():
+            if key.startswith("question_"):
+                try:
+                    choice_id = int(value)
+                    choice = Choice.objects.get(pk=choice_id)
+                    Answer.objects.create(submission=submission, choice=choice)
+                except (ValueError, Choice.DoesNotExist):
+                    continue  # ignore malformed data
 
-        score = (correct_answers / total_questions) * 100 if total_questions else 0
+        # After storing answers, calculate total score
+        submission.calculate_score()
 
-        # Record the submission (associate with the first lesson for simplicity)
-        submission = Submission.objects.create(
-            learner=learner,
-            lesson=course.lessons.first(),
-            score=score
+        # Redirect to result view
+        return redirect(
+            reverse(
+                "show_exam_result",
+                kwargs={"submission_id": submission.id},
+            )
         )
-        request.session['submission_id'] = submission.id
-        return redirect('onlinecourse:show_exam_result', course_id=course.id)
-
-    # GET request – render the exam page
-    return render(request, 'exam.html', {'course': course})
+    else:
+        # Render exam page with questions and choices
+        lessons = Lesson.objects.filter(course=course).prefetch_related(
+            "questions__choices"
+        )
+        return render(
+            request,
+            "exam.html",
+            {"course": course, "lessons": lessons},
+        )
 
 
 @login_required
-def show_exam_result(request, course_id):
+def show_exam_result(request, submission_id):
     """
-    Displays the result of the most recent exam submission for the logged‑in learner.
+    Displays the result of a learner's exam attempt.
+    Shows a congratulatory message, the total score and a breakdown of each
+    question with the selected answer.
     """
-    submission_id = request.session.get('submission_id')
-    submission = get_object_or_404(Submission, pk=submission_id,
-                                   learner__user=request.user)
+    submission = get_object_or_404(Submission, pk=submission_id, learner__user=request.user)
+    # Ensure score is up‑to‑date (in case it was not calculated earlier)
+    submission.calculate_score()
 
+    # Gather detailed answer info
+    answers = submission.answers.select_related("choice__question").all()
     context = {
-        'course': get_object_or_404(Course, pk=course_id),
-        'submission': submission,
-        'message': 'Congratulations! You have completed the exam.'
+        "submission": submission,
+        "answers": answers,
     }
-    return render(request, 'exam_result.html', context)
+    return render(request, "exam_result.html", context)
