@@ -1,71 +1,58 @@
 from django.shortcuts import render, get_object_or_404, redirect
-from django.http import HttpResponseForbidden
 from django.contrib.auth.decorators import login_required
-from django.urls import reverse
-from .models import Lesson, Question, Choice, Submission, Answer
-from decimal import Decimal
+from .models import Course, Lesson, Question, Choice, Submission, Answer
 
 
 @login_required
-def submit(request, lesson_id):
+def submit(request):
     """
-    Handles POST submission of an exam for a given lesson.
-    Expects POST data in the form:
-        choice_<question_id> = <choice_id>
+    Handles POST submissions of exam answers.
+    Expects 'question_id' and 'choice_id' in the POST data.
     """
-    lesson = get_object_or_404(Lesson, pk=lesson_id)
+    if request.method == 'POST':
+        question_id = request.POST.get('question_id')
+        choice_id = request.POST.get('choice_id')
 
-    if request.method != "POST":
-        return HttpResponseForbidden("Only POST requests are allowed.")
+        question = get_object_or_404(Question, pk=question_id)
+        selected_choice = get_object_or_404(Choice, pk=choice_id, question=question)
 
-    # Create a new Submission instance
-    submission = Submission.objects.create(user=request.user, lesson=lesson)
-
-    total_questions = lesson.questions.count()
-    correct_answers = 0
-
-    for question in lesson.questions.all():
-        choice_key = f"choice_{question.id}"
-        selected_choice_id = request.POST.get(choice_key)
-
-        if not selected_choice_id:
-            # No answer provided for this question; skip scoring
-            continue
-
-        selected_choice = get_object_or_404(Choice, pk=selected_choice_id, question=question)
-
-        # Record the answer
-        Answer.objects.create(
-            submission=submission,
+        submission, created = Submission.objects.get_or_create(
+            user=request.user,
             question=question,
-            selected_choice=selected_choice
+            defaults={'selected_choice': selected_choice}
+        )
+        if not created:
+            submission.selected_choice = selected_choice
+            submission.save()
+
+        # Create or update the corresponding Answer record
+        Answer.objects.update_or_create(
+            submission=submission,
+            defaults={'is_correct': selected_choice.is_correct}
         )
 
-        if selected_choice.is_correct:
-            correct_answers += 1
-
-    # Calculate score as a percentage
-    if total_questions:
-        score = (Decimal(correct_answers) / Decimal(total_questions)) * 100
-        submission.score = round(score, 2)
+        return redirect('onlinecourse:show_exam_result')
     else:
-        submission.score = 0
-
-    submission.save()
-
-    return redirect(reverse('show_exam_result', args=[submission.id]))
+        # If not POST, redirect to a generic exam page (implementation dependent)
+        return redirect('onlinecourse:exam_page')
 
 
 @login_required
-def show_exam_result(request, submission_id):
+def show_exam_result(request):
     """
-    Displays the result of a specific exam submission.
-    Shows a congratulatory message if the score is >= 70%.
+    Calculates the user's exam score and renders the result page.
     """
-    submission = get_object_or_404(Submission, pk=submission_id, user=request.user)
+    submissions = Submission.objects.filter(user=request.user).select_related(
+        'question', 'selected_choice'
+    )
+    total_questions = submissions.count()
+    correct_answers = submissions.filter(selected_choice__is_correct=True).count()
+    score_percent = (correct_answers / total_questions * 100) if total_questions else 0
 
     context = {
-        "submission": submission,
-        "passed": submission.score >= 70 if submission.score is not None else False,
+        'total_questions': total_questions,
+        'correct_answers': correct_answers,
+        'score_percent': round(score_percent, 2),
+        'submissions': submissions,
     }
-    return render(request, "exam_result.html", context)
+    return render(request, 'exam_result.html', context)
